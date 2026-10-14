@@ -1,0 +1,25 @@
+# Production overlay: hardened backend, no bind mounts, no published DB ports.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+services:
+  backend:
+    build:
+      target: production
+    volumes: []
+    restart: always
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  mysql:
+    ports: []
+    restart: always
+
+  redis:
+    ports: []
+    restart: always

@@ -36,15 +36,12 @@ BRD: user registration, login and OTP authentication.
 
 | Method & Path | Auth | Description |
 |---|---|---|
-| `POST /auth/register` | none | Register with name, phone/email, password. Body: `{ name, phone, email?, password }`. Returns `201 { userId, otpRequired: true }`. Triggers OTP. |
-| `POST /auth/otp/request` | none | Request (or re-request) OTP. Body: `{ phone?, email?, purpose: "register"\|"login"\|"reset" }`. Returns `200 { expiresInSec }`. Rate-limited. |
-| `POST /auth/otp/verify` | none | Verify OTP. Body: `{ phone?, email?, otp, purpose }`. Returns `200 { accessToken, refreshToken, user }` on success. Errors: `INVALID_OR_EXPIRED_OTP` (400/410). |
-| `POST /auth/otp/resend` | none | Resend OTP (cooldown-enforced). Same body as request minus purpose ambiguity. Error `OTP_COOLDOWN` (429). |
-| `POST /auth/login` | none | Password or OTP-initiated login. Body: `{ phone?, email?, password? }`. If account requires OTP, returns `202 { otpRequired: true }`. Else `200 { accessToken, refreshToken, user }`. |
+| `POST /auth/register` | none | Register with name, phone/email, password + verified Firebase ID token. Body: `{ name, phone, email?, password, firebaseIdToken }`. Returns `201 { userId, accessToken, refreshToken, user }`. |
+| `POST /auth/firebase/verify` | none | Verify Firebase phone-auth ID token (client sends/verifies the SMS OTP). Body: `{ idToken, name? }`. Login-or-register. Returns `200 { accessToken, refreshToken, user }`. Errors: `INVALID_FIREBASE_TOKEN` (401). |
+| `POST /auth/login` | none | Password login. Body: `{ phone?, email?, password }`. Returns `200 { accessToken, refreshToken, user }`. |
 | `POST /auth/refresh` | refresh token | Rotate tokens. Body: `{ refreshToken }` (or cookie). Returns new pair. |
 | `POST /auth/logout` | bearer | Invalidate refresh token. Returns `204`. |
-| `POST /auth/password/forgot` | none | Start reset (Forget Password screen). Body: `{ phone?, email? }`. Sends OTP. Returns `200`. |
-| `POST /auth/password/reset` | none | Complete reset (New Password screen). Body: `{ phone?, email?, otp, newPassword }`. Returns `200`. |
+| `POST /auth/password/reset` | none | Reset with verified Firebase ID token. Body: `{ firebaseIdToken, newPassword }`. Returns `200`. |
 
 ### 2a. Auth field reference (per API)
 
@@ -56,24 +53,21 @@ BRD: user registration, login and OTP authentication.
 | phone | string | M* | E.164; *one of phone/email required |
 | email | string | M* | 3–254 RFC; *one of phone/email required |
 | password | string | M | 8–72 |
+| firebaseIdToken | string | M | Verified Firebase phone-auth ID token; phone must match when both present |
 
-Response `201`: `{ userId: ULID(RO), otpRequired: true(RO) }`.
+Response `201`: `{ userId: ULID(RO), accessToken: string(JWT)(RO), refreshToken: string(RO), user: User(RO, §3a) }`.
 
-**`POST /auth/otp/request`** — Request `{ phone?, email? }` (same types; one required), `{ purpose: enum(register\|login\|reset) M }`. Response `200`: `{ expiresInSec: int(RO) }`.
+**`POST /auth/firebase/verify`** — Request `{ idToken: string M, name?: string(1–100) O }` (name used when auto-creating the user). Response `200`: `{ accessToken, refreshToken, user }(RO)`. Errors: `INVALID_FIREBASE_TOKEN` (401), `AUTH_PROVIDER_UNAVAILABLE` (503).
 
-**`POST /auth/otp/verify`** — Request adds `{ otp: string M, 6 digits }` to the above. Response `200`: `{ accessToken: string(JWT)(RO), refreshToken: string(RO), user: User(RO, §3a) }`.
-
-**`POST /auth/otp/resend`** — Same as request. Error `OTP_COOLDOWN` (429) when resent too soon.
-
-**`POST /auth/login`** — Request `{ phone?, email?, password? }` (same types). Response `200` tokens+user, or `202 { otpRequired: true(RO) }` when OTP is required.
+**`POST /auth/login`** — Request `{ phone?, email?, password: string M }` (same types; one contact required). Response `200` tokens+user.
 
 **`POST /auth/refresh`** — Request `{ refreshToken: string M }` (or cookie). Response `200`: new `{ accessToken, refreshToken }(RO)`.
 
 **`POST /auth/logout`** — No body. Response `204`.
 
-**`POST /auth/password/forgot`** — Request `{ phone?, email? }` (one required). Response `200`.
+**`POST /auth/password/reset`** — Request `{ firebaseIdToken: string M, newPassword: string(8–72) M }`. Response `200`.
 
-**`POST /auth/password/reset`** — Request `{ phone?, email?, otp: string(6 digits) M, newPassword: string(8–72) M }`. Response `200`.
+Phone OTP is owned by Firebase Phone Auth (client SDK sends/verifies the SMS code; auth-only). The legacy `/otp/*` endpoints and `otp_codes` table are retired.
 
 ## 3. Users, Privacy & Account Management
 
@@ -687,7 +681,7 @@ Response `201` (RO): `{ uploadUrl: string(url), mediaUrl: string(url), expiresAt
 
 ## 12. Notifications & Devices
 
-BRD: in-app/push + email + SMS/phone channels; triggers include ticket purchase, event changes, cancellation, refunds, community announcements. Exact providers TBD — server selects provider; no per-provider client API.
+BRD: in-app/push + email channels (SMS is auth-only via Firebase Phone Auth); triggers include ticket purchase/cancel, event cancel/reschedule, refunds, community announcements. Providers decided: push via Firebase Admin SDK / FCM for both platforms (iOS relayed through the APNs key in the Firebase console), email multi-provider with SES SMTP primary + Brevo failover. No per-provider client API.
 
 | Method & Path | Auth | Description |
 |---|---|---|
@@ -814,7 +808,7 @@ Email Support (`support@pegwin.circle`) is a `mailto:` link — no API.
 
 ## 14. Error Catalog (codes) & Status Map
 
-`400` `VALIDATION_ERROR`, `HOLD_EXPIRED` is `410`. `401` `UNAUTHENTICATED`. `403`: `FORBIDDEN`, `ACCOUNT_DELETED_OR_SUSPENDED`, `JOIN_REQUIRES_APPROVAL`, `MEDIA_NOT_ALLOWED_FOR_MEMBERS`. `404`: `EVENT_NOT_FOUND`, `NOT_FOUND`. `409`: `ALREADY_CHECKED_IN`, `EVENT_NOT_EDITABLE`, `EVENT_NOT_LIVE`, `INSUFFICIENT_INVENTORY`, `PAYMENT_ALREADY_EXISTS`, `TIER_CAPACITY_CONFLICT`, `TIER_HAS_SALES`. `422`: `COUPON_INVALID`, `TICKET_INVALID_OR_EXPIRED`. `429`: `OTP_COOLDOWN`, `RATE_LIMITED`. `410`: `INVALID_OR_EXPIRED_OTP`, `HOLD_EXPIRED`. `502`: `REFUND_FAILED`, `GATEWAY_ERROR` (retry-safe; webhooks reconcile). User-facing messages must include recovery guidance per BRD §14.
+`400` `VALIDATION_ERROR`, `HOLD_EXPIRED` is `410`. `401` `UNAUTHENTICATED`, `INVALID_FIREBASE_TOKEN`. `403`: `FORBIDDEN`, `ACCOUNT_DELETED_OR_SUSPENDED`, `JOIN_REQUIRES_APPROVAL`, `MEDIA_NOT_ALLOWED_FOR_MEMBERS`, `PHONE_MISMATCH`. `404`: `EVENT_NOT_FOUND`, `NOT_FOUND`. `409`: `ALREADY_CHECKED_IN`, `EVENT_NOT_EDITABLE`, `EVENT_NOT_LIVE`, `INSUFFICIENT_INVENTORY`, `PAYMENT_ALREADY_EXISTS`, `TIER_CAPACITY_CONFLICT`, `TIER_HAS_SALES`. `422`: `COUPON_INVALID`, `TICKET_INVALID_OR_EXPIRED`. `429`: `RATE_LIMITED`. `410`: `HOLD_EXPIRED`. `502`: `REFUND_FAILED`, `GATEWAY_ERROR` (retry-safe; webhooks reconcile). `503`: `AUTH_PROVIDER_UNAVAILABLE`. Retired with Firebase phone-auth: `OTP_COOLDOWN`, `INVALID_OR_EXPIRED_OTP`. User-facing messages must include recovery guidance per BRD §14.
 
 ## 15. Explicitly Excluded (no endpoints in MVP)
 

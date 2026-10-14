@@ -1,0 +1,43 @@
+'use strict';
+// supertest+stubs. Run: node backend/tests/events.test.js
+const assert=require('assert'),express=require('express'),request=require('supertest');
+const mkRouter=require('../src/routes/eventsRoutes');
+const mk=(s,st) => ({ id: s.padEnd(26,s[1]),host_id: 'H1'.padEnd(26,'1'),title: 'Mela',description: 'd',status: st,city: 'Pune',category: 'music',start_at: '2026-11-01T10:00:00Z',end_at: '2026-11-01T18:00:00Z',min_price: 50000,sold_count: 1,going_count: 2,avg_rating: 4.5 });
+const EV={ sale: mk('E1','on_sale'),draft: mk('E2','draft'),done: mk('E3','completed'),pub: mk('E4','published') };
+const byId={}; Object.values(EV).forEach((e)=>{ byId[e.id]=e; });
+const calls=[],MID='X'.repeat(24) + 'M1';
+const db={ execute: async (sql,p)=>{ calls.push([sql,p]);
+  if (sql.startsWith('SELECT COUNT')) return [[{ n: 1 }],[]];
+  if (sql.includes('events WHERE id=?')) { const e=byId[p[0]]; return [e ? [e] : [],[]]; }
+  if (sql.includes('agenda_slots')) return [[{ time: '10:00',title: 'Open' }],[]];
+  if (sql.includes('tickets')) return [[{ id: 'T1',name: 'Asha' }],[]];
+  if (sql.startsWith('SELECT * FROM event_team')) return [p[1] === MID ? [{ id: 'TM1',permissions: '["scan_tickets"]' }] : [],[]];
+  if (sql.includes('event_team')) return [[{ id: 'TM1',userId: 'M1' }],[]];
+  return [[{ affectedRows: 1 }],[]]; } };
+const auth=(role) => (req,r,n)=>{ req.user=req.headers['x-user'] ? JSON.parse(req.headers['x-user']) : undefined;
+  if (role&&!req.user) return r.status(401).json({ error: { code: 'UNAUTHENTICATED',message: 'x' } });
+  n(); };
+const errors={ send: (res,s,code,message) => res.status(s).json({ error: { code,message } }) };
+let n=0;
+const app=express(); app.use(express.json()); app.use('/api/v1',mkRouter({ db,auth,errors,uid: () => `U${++n}`.padEnd(26,'0'),http: {} }));
+const H={ 'x-user': JSON.stringify({ id: EV.sale.host_id,role: 'host' }) },U={ 'x-user': JSON.stringify({ id: 'UX'.padEnd(26,'9'),role: 'user' }) },M={ 'x-user': JSON.stringify({ id: MID,role: 'event_staff' }) };
+(async ()=>{
+  let r=await request(app).get('/api/v1/events?city=Pune&category=music&mode=offline&page=1&limit=20');
+  assert.equal(r.status,200); assert.deepEqual([r.body.page,r.body.limit],[1,20]); assert.ok(Array.isArray(r.body.data));
+  assert.ok(calls[1][1].includes('Pune')&&calls[1][1].includes('music'),'filters in SQL');
+  r=await request(app).get('/api/v1/events?limit=500'); assert.equal(r.body.limit,100);
+  r=await request(app).get(`/api/v1/events/${EV.pub.id}`); assert.equal(r.body.error.code,'EVENT_NOT_FOUND');
+  r=await request(app).get(`/api/v1/events/${EV.draft.id}`).set(H); assert.equal(r.status,200);
+  r=await request(app).patch(`/api/v1/events/${EV.pub.id}`).set(H).send({ title: 'X' }); assert.equal(r.body.error.code,'EVENT_NOT_EDITABLE');
+  r=await request(app).patch(`/api/v1/events/${EV.draft.id}`).set(H).send({ title: 'N' }); assert.equal(r.status,200);
+  r=await request(app).post(`/api/v1/events/${EV.draft.id}/submit-review`).set(H); assert.deepEqual(r.body,{ status: 'review' });
+  r=await request(app).post(`/api/v1/events/${EV.pub.id}/submit-review`).set(H); assert.equal(r.body.error.code,'EVENT_NOT_EDITABLE');
+  r=await request(app).post('/api/v1/events').set(H).send({ title: 'T',description: 'D',startAt: '2026-12-01T10:00:00Z',endAt: '2026-12-01T12:00:00Z',address: 'A',city: 'Pune' }); assert.equal(r.status,201);
+  r=await request(app).post(`/api/v1/events/${EV.done.id}/rehost`).set(H); assert.equal(r.status,201);
+  r=await request(app).post(`/api/v1/events/${EV.sale.id}/rehost`).set(H); assert.equal(r.body.error.code,'EVENT_NOT_EDITABLE');
+  r=await request(app).get(`/api/v1/events/${EV.sale.id}/team`).set(U); assert.equal(r.body.error.code,'FORBIDDEN');
+  r=await request(app).get(`/api/v1/events/${EV.sale.id}/team`).set(H); assert.ok(Array.isArray(r.body.data));
+  r=await request(app).get(`/api/v1/events/${EV.sale.id}/checkins`).set(U); assert.equal(r.body.error.code,'FORBIDDEN');
+  r=await request(app).get(`/api/v1/events/${EV.sale.id}/checkins?status=checked_in`).set(M); assert.equal(r.status,200);
+  console.log('events slice OK');
+})().catch((e)=>{ console.error('FAIL:',e.message); process.exit(1); });

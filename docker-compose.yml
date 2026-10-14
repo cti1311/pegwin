@@ -1,0 +1,80 @@
+# Pegwin local stack: API + MySQL 8 + Redis 7.
+# Usage:
+#   cp backend/.env.example backend/.env   # then set DB_PASSWORD / JWT_SECRET
+#   docker compose up --build                # dev target with hot reload
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+# Tests (run on the host with Node 20, or inside the container):
+#   docker compose exec backend npm test
+#   docker compose exec backend npm run migrate
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/tests:/app/tests
+      - ./backend/migrations:/app/migrations
+      - /app/node_modules
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: pegwin
+      DB_PASSWORD: ${DB_PASSWORD:-pegwin_dev}
+      DB_NAME: pegwin
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      PAYMENTS_DRAFT: ${PAYMENTS_DRAFT:-true}
+      REDIS_URL: redis://redis:6379/0
+      NODE_ENV: development
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - backend-net
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    command: --default-authentication-plugin=mysql_native_password
+    ports:
+      - "127.0.0.1:3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-pegwin_root}
+      MYSQL_DATABASE: pegwin
+      MYSQL_USER: pegwin
+      MYSQL_PASSWORD: ${DB_PASSWORD:-pegwin_dev}
+    volumes:
+      - mysqldata:/var/lib/mysql
+    networks:
+      - backend-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${DB_ROOT_PASSWORD:-pegwin_root}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    networks:
+      - backend-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+networks:
+  backend-net:
+
+volumes:
+  mysqldata:
+  redisdata:
